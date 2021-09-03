@@ -15,6 +15,8 @@
 #include <arpa/inet.h>
 #include <netdb.h>
 #include <stddef.h>
+#include <openssl/ssl.h>
+#include <openssl/err.h>
 
 #define BUFF 4096
 #define Malloc(n,type) (type *) malloc( (unsigned) ((n)*sizeof(type)))
@@ -33,13 +35,14 @@ typedef struct {
   char date[128];
   unsigned long size;
   char content_type[128];
+  char location[2048];
 
 }HEADER;
 
 
 typedef struct{
 
-  int sock;
+  SSL* ssl;
   int fd;
   int size;
   int id;
@@ -47,6 +50,20 @@ typedef struct{
   unsigned long offset;
 
 }INFO;
+
+
+void log_ssl()
+{
+    int err;
+    while (err = ERR_get_error()) {
+        char *str = ERR_error_string(err, 0);
+        if (!str)
+            return;
+        printf(str);
+        printf("\n");
+        fflush(stdout);
+    }
+}
 
 
 void
@@ -76,13 +93,13 @@ print_progress(char label[], int step, int total)
 }
 
 
-int extractHeaders(int sock){
+int extractHeaders(SSL* sock){
   int bytesReceived, bytes = 0;
 
   in_buff[0] = '-';in_buff[1] = '-';in_buff[2] = '-';in_buff[3] = '\n'; //filling initial buffer
   char* p = in_buff + 4;
   
-  while(bytesReceived = read(sock, p, 1)){
+  while(bytesReceived = SSL_read(sock, p, 1)){
     if((p[-3]=='\r')  && (p[-2]=='\n' ) &&
           (p[-1]=='\r')  && (*p=='\n' )) break;
       p++;
@@ -93,7 +110,7 @@ return bytes;
 }
 
 
-HEADER* parseHeader(int sock){
+HEADER* parseHeader(SSL* sock){
 
   HEADER* header = Malloc(1, HEADER);
   
@@ -137,6 +154,10 @@ HEADER* parseHeader(int sock){
     else if (strcmp(token2, "Content-Type:") == 0){
       strcpy(header->content_type, token);
     }
+
+    else if (strcmp(token2, "Location:") == 0){
+      strcpy(header->location, token);
+    }
     
   }
 
@@ -159,7 +180,7 @@ void *download (void *arg){
 
   fprintf(stderr, "Thread %d -- with workload %d bytes...\n", info->id, load);
 
-  while(bytesReceived = read(info->sock, in_buff, BUFF)){
+  while(bytesReceived = SSL_read(info->ssl, in_buff, BUFF)){
 
     pthread_mutex_lock(&lock);
     
@@ -204,6 +225,10 @@ void *pauseDnld (void *arg){
 
 }
 
+
+// void parseURL(char* url, char* domain, char* path){
+
+// }
 
 
 int main(int ac, char* av[]){
@@ -256,7 +281,7 @@ int main(int ac, char* av[]){
   //specify the address
   struct sockaddr_in server_addr;
   server_addr.sin_family = AF_INET;
-  server_addr.sin_port = htons(80);
+  server_addr.sin_port = htons(443);
   server_addr.sin_addr = *((struct in_addr *)h->h_addr);
 
 
@@ -268,6 +293,33 @@ int main(int ac, char* av[]){
   fprintf(stderr, "Connected. \n");
 
 
+  // SSL connection
+
+  SSL *ssl;
+  SSL_library_init();
+  SSLeay_add_ssl_algorithms();
+  SSL_load_error_strings();
+  const SSL_METHOD *meth = TLSv1_2_client_method();
+  SSL_CTX *ctx = SSL_CTX_new (meth);
+  ssl = SSL_new (ctx);
+  if (!ssl) {
+      printf("Error creating SSL.\n");
+      log_ssl();
+      return -1;
+  }
+  // sock = SSL_get_fd(ssl);
+  SSL_set_fd(ssl, sock);
+  int err = SSL_connect(ssl);
+  if (err <= 0) {
+      printf("Error creating SSL connection.  err=%x\n", err);
+      log_ssl();
+      fflush(stdout);
+      return -1;
+  }
+  printf ("SSL connection using %s\n", SSL_get_cipher (ssl));
+
+
+
   //send dnld information
 
   
@@ -277,7 +329,7 @@ int main(int ac, char* av[]){
 
   fprintf(stderr, "Sending request: \n\n%s\n", out_buff);
 
-  if (0 > send(sock, out_buff, strlen(out_buff), 0))
+  if (0 > SSL_write(ssl, out_buff, strlen(out_buff)))
     perror("Error in sending to server");
 
 
@@ -285,24 +337,50 @@ int main(int ac, char* av[]){
 
   fprintf(stderr, "Receiving...\n\n");
 
-
   HEADER* header = Malloc(1, HEADER);
-  header  = parseHeader(sock);
+  header  = parseHeader(ssl);
 
   printf("status: %s %s\t size: %ld\t date: %s\n", header->status, header->statusName, header->size, header->date);
+  
+
+  while(strcmp(header->status,"302") == 0){
+
+    strcpy(url, header->location);
+
+    fprintf(stderr,"redirecting to:  %s\n",header->location);
+    
+    // parseURL(header->location, &domain, &path);
+    
+    protocol = strtok_r(url, "://", &url);
+
+    domain = strtok_r(url, "/", &url);
+    path = url;
+    
+    puts(path);
+    snprintf(out_buff, sizeof(out_buff), "GET /%s HTTP/1.1\r\nHost: %s\r\n\r\n", path, domain);
+    if (0 > SSL_write(ssl, out_buff, strlen(out_buff)))
+      perror("Error in sending to server");
+    header  = parseHeader(ssl);
+    fprintf(stderr, "status: %s %s\t size: %ld\t date: %s\n", header->status, header->statusName, header->size, header->date);
+  
+  }
 
   
   // Deriving the name of the file
+  if(strcmp(header->status, "200") &&  strcmp(header->status, "302")) {
+    puts("request could not be completed, exiting...");
+    exit(1);
+  }
 
   char* fname = "unknown.file"; int bytesReceived;
-  char* token = url;
+  char* token = path;
 
   while(token){
     fname = token;
-    token = strtok_r(url, "/", &url);
+    token = strtok_r(path, "/", &path);
   }
 
-  fprintf(stderr, "Downloading file: %s ...\n\n", fname);
+  fprintf(stderr, "Downloading file: '%s' ...\n\n", fname);
 
   int fd = open(fname, O_WRONLY|O_CREAT);
 
@@ -342,7 +420,7 @@ int main(int ac, char* av[]){
     info[i]->fd = fd;  //TODO make global
     info[i]->offset = offset[i];
     info[i]->end = end[i];
-    info[i]->sock = sock;
+    info[i]->ssl = ssl;
     info[i]->id = i;
     // printf("New thread %d\n", i);
     if (-1 == pthread_create(&tid[i], NULL, download, (void *) info[i]))
@@ -358,7 +436,7 @@ int main(int ac, char* av[]){
   close(fd);
 
 
-fprintf(stderr, "'%s' Successful Downloaded :) \n\n", fname);
+fprintf(stderr, "'%s' Successfully Downloaded :) \n\n", fname);
 
 
 float secs = (float)(stop.tv_usec - strt.tv_usec) / 1000000 + (float)(stop.tv_sec - strt.tv_sec);
