@@ -3,7 +3,7 @@
 It is a `wget` like file downloader allowing __more than one thread__. 
 
 ## Building
-You might need a unix-like system to build this program (NOT compatible with windows environment). To build use the following command: ```gcc -pthread multi-thread-dwnl.c -o mdnl -lncurses -lssl -lcrypto```
+You might need a unix-like system to build this program (NOT compatible with windows environment). To _build_ use the following command: ```gcc -pthread multi-thread-dwnl.c -o mdnl -lncurses -lssl -lcrypto```
 
  
 
@@ -16,6 +16,7 @@ So, you may want to install the dependencies. For _OpenSLL_ and _ncurse_ part yo
 
  
 ## Running 
-To run the compiled executable: 
+To _run_ the compiled executable: 
 ```./mdnl [url] [# of threads]```
-To pause/resume downloading you will beed to press `Enter`.
+
+To pause/resume downloading you will need to press `Enter`.
