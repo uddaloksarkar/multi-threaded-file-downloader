@@ -18,3 +18,4 @@ So, you may want to install the dependencies. For _OpenSLL_ and _ncurse_ part yo
 ## Running 
 To run the compiled executable: 
 ```./mdnl [url] [# of threads]```
+To pause/resume downloading you will beed to press `Enter`.
