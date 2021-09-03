@@ -2,7 +2,8 @@
 
 It is a `wget` like file downloader allowing __more than one thread__. 
 
-To compile use the following command: \n
+To compile use the following command:
+
 ```gcc -pthread multi-thread-dwnl.c -o mdnl -lncurses -lssl -lcrypto```
 
 
