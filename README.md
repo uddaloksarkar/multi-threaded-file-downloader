@@ -1,8 +1,9 @@
-# multi-threaded-file-downloader
+# Multi Threaded File Downloader
 
 It is a `wget` like file downloader allowing __more than one thread__. 
 
-To compile use the following command: ```gcc -pthread multi-thread-dwnl.c -o mdnl -lncurses -lssl -lcrypto```
+## Building
+You might need a unix-like system to build this program (NOT compatible with windows environment). To build use the following command: ```gcc -pthread multi-thread-dwnl.c -o mdnl -lncurses -lssl -lcrypto```
 
  
 
@@ -14,6 +15,6 @@ So, you may want to install the dependencies. For _OpenSLL_ and _ncurse_ part yo
 ```sudo apt-get install libncurses5-dev libncursesw5-dev```
 
  
-
+## Running 
 To run the compiled executable: 
-```./mdnl [url] [# of treads]```
+```./mdnl [url] [# of threads]```
