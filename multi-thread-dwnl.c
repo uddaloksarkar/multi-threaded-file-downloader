@@ -24,7 +24,9 @@
 char out_buff[BUFF], in_buff[BUFF] = "";
 
 pthread_mutex_t mutex;
-pthread_mutex_t lock;
+pthread_mutex_t lock;   //to take care of pause func
+char* fname = "unknown.file";
+char* domain; char* path;
 
 typedef struct {
 
@@ -43,13 +45,14 @@ typedef struct {
 typedef struct{
 
   SSL* ssl;
-  int fd;
   int size;
   int id;
   unsigned long end;
   unsigned long offset;
+  struct sockaddr_in server_addr;
 
 }INFO;
+
 
 
 void log_ssl()
@@ -59,15 +62,16 @@ void log_ssl()
         char *str = ERR_error_string(err, 0);
         if (!str)
             return;
-        printf(str);
+        printf("%s", str);
         printf("\n");
         fflush(stdout);
     }
 }
 
 
+
 void
-print_progress(char label[], int step, int total)
+print_progress(char label[], unsigned long step, unsigned long total)
 {
   //progress width
     const int pwidth = 50;
@@ -86,11 +90,12 @@ print_progress(char label[], int step, int total)
     printf("%c", '>');
 
     //fill progress bar with spaces
-    printf( "% *c", width - pos + 1, ']' );
+    printf( "%*c", width - pos + 1, ']' );
     printf( " %3d%%\r", percent );
 
     fflush(stdout);
 }
+
 
 
 int extractHeaders(SSL* sock){
@@ -148,7 +153,7 @@ HEADER* parseHeader(SSL* sock){
     }
     
     else if (strcmp(token2, "Content-Length:") == 0){
-      header->size = atoi(token);
+      header->size = strtoul(token, NULL, 0);
     }
 
     else if (strcmp(token2, "Content-Type:") == 0){
@@ -167,29 +172,94 @@ HEADER* parseHeader(SSL* sock){
 }
 
 
+
+
 void *download (void *arg){
   
-  pthread_mutex_lock(&mutex);
+  // pthread_mutex_lock(&mutex);
 
   INFO *info = (INFO*) arg;
 
   int bytes, bytesReceived;
   bytes = 0;
   
+  int fd = open(fname, O_WRONLY|O_CREAT);
+
   int load = info->end - info->offset;
+
+  //-----------socket creation and connection----------
+
+  int sock = socket(AF_INET, SOCK_STREAM, 0);
+
+  fprintf(stderr, "Thread %d Connecting to server...\n", info->id);
+  if (0 > connect(sock, (struct sockaddr *)&info->server_addr, sizeof(struct sockaddr))){
+       perror("Unable to Connect");
+       // exit(1);
+    }
+  fprintf(stderr, "Connected. \n");
+
+
+  //---------------SSL connection-------------
+
+  SSL *ssl;
+  SSL_library_init();
+  SSLeay_add_ssl_algorithms();
+  SSL_load_error_strings();
+  
+  const SSL_METHOD *meth;
+#if defined(LWS_HAVE_TLS_CLIENT_METHOD)
+  meth = (SSL_METHOD *)TLS_client_method();
+#elif defined(LWS_HAVE_TLSV1_2_CLIENT_METHOD)
+  meth = (SSL_METHOD *)TLSv1_2_client_method();
+#else
+  meth = (SSL_METHOD *)SSLv23_client_method();
+#endif
+
+  SSL_CTX *ctx = SSL_CTX_new (meth);
+  ssl = SSL_new (ctx);
+  if (!ssl) {
+      printf("Error creating SSL.\n");
+      log_ssl();
+  }
+  // sock = SSL_get_fd(ssl);
+  SSL_set_fd(ssl, sock);
+  int err = SSL_connect(ssl);
+  if (err <= 0) {
+      printf("Error creating SSL connection.  err=%x\n", err);
+      log_ssl();
+      fflush(stdout);
+  }
+  fprintf (stderr, "SSL connection using %s\n", SSL_get_cipher (ssl));
+
+  
+  //-------------sedning GET request to fetch the data-----------
+
+  snprintf(out_buff, sizeof(out_buff), "GET /%s HTTP/1.1\r\nHost: %s\r\nRange: bytes=%ld-%ld\r\n\r\n", path, domain, info->offset, info->end);
+
+  if (0 > SSL_write(ssl, out_buff, strlen(out_buff)))
+    perror("Error in sending to server");
+  puts(out_buff);
+
+  
+  // --------------Download starts------------
 
   fprintf(stderr, "Thread %d -- with workload %d bytes...\n", info->id, load);
 
-  while(bytesReceived = SSL_read(info->ssl, in_buff, BUFF)){
+  extractHeaders(ssl); // to flush out the Header
+
+  lseek(fd, info->offset, SEEK_SET);
+
+  while(1){
 
     pthread_mutex_lock(&lock);
     
-    write(info->fd, in_buff, bytesReceived);
+    if(!(bytesReceived = SSL_read(ssl, in_buff, BUFF))) break;
+
+    write(fd, in_buff, bytesReceived);
     bytes += bytesReceived;
 
     print_progress("Downloading...", (int)bytes, (int)load);
     // fprintf(stderr, "Thread Downloading...%d\r", bytes);
-  
 
     pthread_mutex_unlock(&lock);
 
@@ -202,9 +272,10 @@ void *download (void *arg){
   
   puts("\n");
   
-  pthread_mutex_unlock(&mutex);
+  // pthread_mutex_unlock(&mutex);
 
 }
+
 
 
 void *pauseDnld (void *arg){
@@ -231,6 +302,8 @@ void *pauseDnld (void *arg){
 // }
 
 
+
+
 int main(int ac, char* av[]){
 
   struct timeval strt, stop;
@@ -240,16 +313,13 @@ int main(int ac, char* av[]){
   char* protocol;
   protocol = strtok_r(url, "://", &url);
 
-  char* domain = strtok_r(url, "/", &url);
-  char* path = url;
+  domain = strtok_r(url, "/", &url);
+  path = url;
 
-
-  // char domain[] = "web.stanford.edu", path[]="class/cs276/19handouts/lecture7-probir-6per.pdf";
-  
 
   struct hostent* h = gethostbyname(domain);
   fprintf(stderr, "%s\n", h->h_addr);
-  fprintf(stderr, "%ld\n", ((struct in_addr *)h->h_addr)->s_addr);
+  fprintf(stderr, "%d\n", ((struct in_addr *)h->h_addr)->s_addr);
   fprintf(stderr, "%s\n\n", inet_ntoa(*(struct in_addr *)h->h_addr));
 
   /*
@@ -275,7 +345,8 @@ int main(int ac, char* av[]){
 
   */
 
-  //socket creation
+  //---------socket creation------------
+  
   int sock = socket(AF_INET, SOCK_STREAM, 0);
 
   //specify the address
@@ -293,13 +364,23 @@ int main(int ac, char* av[]){
   fprintf(stderr, "Connected. \n");
 
 
-  // SSL connection
+
+  //---------SSL connection--------------
 
   SSL *ssl;
   SSL_library_init();
   SSLeay_add_ssl_algorithms();
   SSL_load_error_strings();
-  const SSL_METHOD *meth = TLSv1_2_client_method();
+  
+  const SSL_METHOD *meth;
+#if defined(LWS_HAVE_TLS_CLIENT_METHOD)
+  meth = (SSL_METHOD *)TLS_client_method();
+#elif defined(LWS_HAVE_TLSV1_2_CLIENT_METHOD)
+  meth = (SSL_METHOD *)TLSv1_2_client_method();
+#else
+  meth = (SSL_METHOD *)SSLv23_client_method();
+#endif
+  
   SSL_CTX *ctx = SSL_CTX_new (meth);
   ssl = SSL_new (ctx);
   if (!ssl) {
@@ -320,13 +401,11 @@ int main(int ac, char* av[]){
 
 
 
-  //send dnld information
+  //-----------HEAD request to fetch downld information-----------------
 
   
-  fprintf(stderr, "GET /%s HTTP/1.1\r\nHost: %s\r\n\r\n", path, domain);
-
-  snprintf(out_buff, sizeof(out_buff), "GET /%s HTTP/1.1\r\nHost: %s\r\n\r\n", path, domain);
-
+  snprintf(out_buff, sizeof(out_buff), "HEAD /%s HTTP/1.1\r\nHost: %s\r\n\r\n", path, domain);
+    
   fprintf(stderr, "Sending request: \n\n%s\n", out_buff);
 
   if (0 > SSL_write(ssl, out_buff, strlen(out_buff)))
@@ -343,6 +422,7 @@ int main(int ac, char* av[]){
   printf("status: %s %s\t size: %ld\t date: %s\n", header->status, header->statusName, header->size, header->date);
   
 
+  //-----------redirection for 302-------------------
   while(strcmp(header->status,"302") == 0){
 
     strcpy(url, header->location);
@@ -355,37 +435,74 @@ int main(int ac, char* av[]){
 
     domain = strtok_r(url, "/", &url);
     path = url;
-    
+
+    //socket creation
+    int sock2 = socket(AF_INET, SOCK_STREAM, 0);
+
+    //specify the address
+    // struct sockaddr_in server_addr;
+    // server_addr.sin_family = AF_INET;
+    // server_addr.sin_port = htons(80);
+    // server_addr.sin_addr = *((struct in_addr *)h->h_addr);
+
+    struct hostent* h = gethostbyname(domain);
+    server_addr.sin_addr = *((struct in_addr *)h->h_addr);
+    fprintf(stderr, "%s\n\n", inet_ntoa(*(struct in_addr *)h->h_addr));
+
+    fprintf(stderr, "Connecting to server...\n");
+    if (0 > connect(sock2, (struct sockaddr *)&server_addr, sizeof(struct sockaddr))){
+         perror("Unable to Connect");
+         // exit(1);
+      }
+    fprintf(stderr, "Connected. \n");
+
+    // sock = SSL_get_fd(ssl);
+    SSL_set_fd(ssl, sock2);
+    int err = SSL_connect(ssl);
+    if (err <= 0) {
+        printf("Error creating SSL connection.  err=%x\n", err);
+        log_ssl();
+        fflush(stdout);
+        return -1;
+    }
+    printf ("SSL connection using %s\n", SSL_get_cipher (ssl));
+      
     puts(path);
-    snprintf(out_buff, sizeof(out_buff), "GET /%s HTTP/1.1\r\nHost: %s\r\n\r\n", path, domain);
+    fprintf(stderr, "GET /%s HTTP/1.1\r\nHost: %s\r\n\r\n", path, domain);
+    snprintf(out_buff, sizeof(out_buff), "GET /%s HTTP/1.1\r\nHost: %s\r\nRange: bytes=%d-%d\r\n\r\n", path, domain, 0, 1024);
     if (0 > SSL_write(ssl, out_buff, strlen(out_buff)))
       perror("Error in sending to server");
     header  = parseHeader(ssl);
     fprintf(stderr, "status: %s %s\t size: %ld\t date: %s\n", header->status, header->statusName, header->size, header->date);
-  
+     
   }
 
   
-  // Deriving the name of the file
-  if(strcmp(header->status, "200") &&  strcmp(header->status, "302")) {
+  //--------------Deriving the name of the file------------------
+
+  if( header->status[0]!='2' &&  strcmp(header->status, "302")) {
     puts("request could not be completed, exiting...");
     exit(1);
   }
 
-  char* fname = "unknown.file"; int bytesReceived;
-  char* token = path;
+  int bytesReceived;
+  char* pp = Malloc(124, char);
+  strcpy(pp, path);
+  char* token = pp;
 
   while(token){
     fname = token;
-    token = strtok_r(path, "/", &path);
+    token = strtok_r(pp, "/", &pp);
   }
 
   fprintf(stderr, "Downloading file: '%s' ...\n\n", fname);
 
   int fd = open(fname, O_WRONLY|O_CREAT);
 
+  close(fd);
 
-  // Create threads and distribute
+
+  //------------Create threads and distribute----------------------
 
   pthread_t *tid, t;
 
@@ -403,7 +520,7 @@ int main(int ac, char* av[]){
   unsigned long* end = Malloc(N, unsigned long);
     offset[0] = 0; end[0] = thread_capacity;
     for (int i=1; i<N; i++){
-      offset[i] = end[i-1];
+      offset[i] = end[i-1]+1;
       end[i] =  offset[i] + thread_capacity;
     }
     end[N-1] = header->size;
@@ -417,11 +534,11 @@ int main(int ac, char* av[]){
   gettimeofday(&strt, NULL);
 
   for(int i=0; i<N; i++){
-    info[i]->fd = fd;  //TODO make global
     info[i]->offset = offset[i];
     info[i]->end = end[i];
     info[i]->ssl = ssl;
     info[i]->id = i;
+    info[i]->server_addr = server_addr;
     // printf("New thread %d\n", i);
     if (-1 == pthread_create(&tid[i], NULL, download, (void *) info[i]))
           perror("pthread_create failed");
@@ -430,10 +547,6 @@ int main(int ac, char* av[]){
     pthread_join(tid[i], NULL);
   }
   gettimeofday(&stop, NULL);
-  
-  // pthread_join(t, NULL); //joining this will give abrupt pause at end, so rather NOT
-
-  close(fd);
 
 
 fprintf(stderr, "'%s' Successfully Downloaded :) \n\n", fname);
